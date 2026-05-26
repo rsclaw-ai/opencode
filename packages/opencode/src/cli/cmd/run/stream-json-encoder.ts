@@ -166,7 +166,7 @@ interface StepFinishPartData {
   }
 }
 
-type PartData = ToolPartData | TextPartData | ReasoningPartData | StepFinishPartData | { type: string; [k: string]: unknown }
+type PartData = ToolPartData | TextPartData | ReasoningPartData | StepFinishPartData | { type: string; id: string; [k: string]: unknown }
 
 // ---------------------------------------------------------------------------
 // Encoder
