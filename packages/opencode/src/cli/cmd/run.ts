@@ -9,7 +9,8 @@
 //      opencode server and runs interactive mode against it.
 //
 // Also supports `--command` for slash-command execution, `--format json` for
-// raw event streaming, `--continue` / `--session` for session resumption,
+// raw event streaming, `--output-format stream-json` for Claude Code-compatible
+// NDJSON frames, `--continue` / `--session` for session resumption,
 // and `--fork` for forking before continuing.
 import type { Argv } from "yargs"
 import path from "path"
@@ -27,6 +28,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { InstanceRef } from "@/effect/instance-ref"
 import { FormatError, FormatUnknownError } from "../error"
 import { INTERACTIVE_INPUT_ERROR, resolveInteractiveStdin } from "./run/runtime.stdin"
+import { StreamJsonEncoder } from "./run/stream-json-encoder"
 
 const runtimeTask = import("./run/runtime")
 type ModelInput = Parameters<OpencodeClient["session"]["prompt"]>[0]["model"]
@@ -178,6 +180,18 @@ export const RunCommand = effectCmd({
         default: "default",
         describe: "format: default (formatted) or json (raw JSON events)",
       })
+      .option("output-format", {
+        type: "string",
+        choices: ["default", "stream-json"],
+        default: "default",
+        describe: "output format: default or stream-json (Claude Code-compatible NDJSON frames)",
+      })
+      .check((argv) => {
+        if (argv["format"] !== "default" && argv["output-format"] !== "default") {
+          throw new Error("--format and --output-format are mutually exclusive")
+        }
+        return true
+      })
       .option("file", {
         alias: ["f"],
         type: "string",
@@ -260,6 +274,34 @@ export const RunCommand = effectCmd({
         }
 
         throw error
+      }
+
+      // When --output-format stream-json and no positional message, read the
+      // prompt from stdin (one NDJSON line — CAP's stream-json Prompt frame).
+      // This lets CAP drive OpenCode the same way it drives Claude Code:
+      // spawn → send prompt via stdin → read stream-json frames from stdout.
+      if (args["output-format"] === "stream-json" && args.message.length === 0) {
+        const readline = await import("readline")
+        const rl = readline.createInterface({ input: process.stdin })
+        const line = await new Promise<string>((resolve) => {
+          rl.once("line", (l: string) => resolve(l))
+          rl.once("close", () => resolve(""))
+        })
+        rl.close()
+        if (line) {
+          try {
+            const frame = JSON.parse(line)
+            if (frame.type === "user" && frame.message?.content) {
+              const texts = frame.message.content
+                .filter((c: { type: string }) => c.type === "text")
+                .map((c: { text: string }) => c.text)
+              args.message = texts
+            }
+          } catch {
+            // Not JSON — use raw line as the message.
+            args.message = [line]
+          }
+        }
       }
 
       let message = [...args.message, ...(args["--"] || [])]
@@ -637,8 +679,23 @@ export const RunCommand = effectCmd({
         async function loop(client: OpencodeClient, events: Awaited<ReturnType<typeof sdk.event.subscribe>>) {
           const toggles = new Map<string, boolean>()
           let error: string | undefined
+          const streamJson = args["output-format"] === "stream-json"
+          const encoder = streamJson ? new StreamJsonEncoder() : undefined
+          if (encoder) encoder.init(sessionID)
 
           for await (const event of events.stream) {
+            // stream-json mode: delegate to encoder, skip UI/default/json paths.
+            // Permission prompts are still handled below.
+            if (streamJson && encoder) {
+              if (event.type === "permission.asked") {
+                // fall through to permission handler below
+              } else {
+                const result = encoder.processEvent(event as { type: string; properties: Record<string, unknown> })
+                if (result === "break") break
+                continue
+              }
+            }
+
             if (
               event.type === "message.updated" &&
               event.properties.sessionID === sessionID &&
@@ -755,6 +812,9 @@ export const RunCommand = effectCmd({
               }
             }
           }
+          // If stream-json mode, ensure result frame is emitted even if
+          // session.status idle wasn't received (e.g., stream closed early).
+          if (encoder) encoder.finalize()
           return error
         }
         const cwd = args.attach ? (directory ?? sess.directory ?? (await current(sdk))) : (directory ?? root)
@@ -767,7 +827,7 @@ export const RunCommand = effectCmd({
 
         if (!args.interactive) {
           const events = await client.event.subscribe()
-          loop(client, events).catch((e) => {
+          const loopPromise = loop(client, events).catch((e) => {
             console.error(e)
             process.exit(1)
           })
@@ -785,6 +845,7 @@ export const RunCommand = effectCmd({
               if (!emit("error", { error: result.error })) UI.error(formatRunError(result.error))
               process.exitCode = 1
             }
+            await loopPromise
             return
           }
 
@@ -800,6 +861,7 @@ export const RunCommand = effectCmd({
             if (!emit("error", { error: result.error })) UI.error(formatRunError(result.error))
             process.exitCode = 1
           }
+          await loopPromise
           return
         }
 
