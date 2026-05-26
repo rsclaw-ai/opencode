@@ -45,7 +45,7 @@ jobs:
             archive: zip
             binary: opencode.exe
           - target: opencode-windows-arm64
-            os: windows-11-arm
+            os: ubuntu-24.04
             archive: zip
             binary: opencode.exe
 
