@@ -1,0 +1,92 @@
+name: Release Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.15.15)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    name: Build cross-platform binaries
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build binaries (cross-compile all targets)
+        run: bun run build
+        working-directory: packages/opencode
+        env:
+          OPENCODE_VERSION: ${{ steps.ver.outputs.version }}
+          OPENCODE_CHANNEL: latest
+
+      - name: Package 6 selected targets
+        run: |
+          set -euo pipefail
+          DIST=packages/opencode/dist
+          VERSION="${{ steps.ver.outputs.version }}"
+          mkdir -p release
+
+          for name in opencode-linux-x64 opencode-linux-arm64 opencode-darwin-x64 opencode-darwin-arm64; do
+            if [ ! -d "$DIST/$name/bin" ]; then
+              echo "Missing $DIST/$name/bin" >&2
+              exit 1
+            fi
+            tar czf "release/${name}-v${VERSION}.tar.gz" -C "$DIST/$name" bin
+          done
+
+          for name in opencode-windows-x64 opencode-windows-arm64; do
+            if [ ! -d "$DIST/$name/bin" ]; then
+              echo "Missing $DIST/$name/bin" >&2
+              exit 1
+            fi
+            (cd "$DIST/$name" && zip -r "$GITHUB_WORKSPACE/release/${name}-v${VERSION}.zip" bin)
+          done
+
+          ls -lh release/
+
+      - name: Checksums
+        run: |
+          cd release
+          sha256sum opencode-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            release/opencode-*
+            release/SHA256SUMS.txt
