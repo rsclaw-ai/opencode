@@ -258,6 +258,23 @@ for (const item of targets) {
   }
 
   await $`rm -rf ./dist/${name}/bin/tui`
+
+  // License compliance: ship LICENSE + source attribution alongside the binary.
+  // MIT §1 requires the copyright notice to accompany every binary copy.
+  await $`cp ../../LICENSE dist/${name}/bin/LICENSE`
+  const sourceNote =
+    `This binary is built from rsclaw-ai/opencode\n` +
+    `(a fork of anomalyco/opencode).\n` +
+    `\n` +
+    `Upstream:  https://github.com/anomalyco/opencode\n` +
+    `Fork:      https://github.com/rsclaw-ai/opencode\n` +
+    `Version:   v${Script.version}\n` +
+    `Commit:    ${process.env.GITHUB_SHA ?? "local"}\n` +
+    `License:   MIT (see LICENSE)\n` +
+    `\n` +
+    `This is a third-party build. For official releases, see the upstream.\n`
+  await Bun.file(`dist/${name}/bin/SOURCE.txt`).write(sourceNote)
+
   await Bun.file(`dist/${name}/package.json`).write(
     JSON.stringify(
       {
