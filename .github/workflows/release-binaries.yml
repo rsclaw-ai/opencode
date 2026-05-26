@@ -18,8 +18,37 @@ env:
 
 jobs:
   build:
-    name: Build cross-platform binaries
-    runs-on: ubuntu-24.04
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: opencode-linux-x64
+            os: ubuntu-24.04
+            archive: tar.gz
+            binary: opencode
+          - target: opencode-linux-arm64
+            os: ubuntu-24.04-arm
+            archive: tar.gz
+            binary: opencode
+          - target: opencode-darwin-x64
+            os: macos-14
+            archive: tar.gz
+            binary: opencode
+          - target: opencode-darwin-arm64
+            os: macos-14
+            archive: tar.gz
+            binary: opencode
+          - target: opencode-windows-x64
+            os: windows-latest
+            archive: zip
+            binary: opencode.exe
+          - target: opencode-windows-arm64
+            os: windows-11-arm
+            archive: zip
+            binary: opencode.exe
+
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -32,6 +61,7 @@ jobs:
 
       - name: Resolve version
         id: ver
+        shell: bash
         run: |
           if [ -n "${{ inputs.tag }}" ]; then
             TAG="${{ inputs.tag }}"
@@ -44,41 +74,71 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Build binaries (cross-compile all targets)
+      - name: Build binary for ${{ matrix.target }}
         run: bun run build
         working-directory: packages/opencode
         env:
           OPENCODE_VERSION: ${{ steps.ver.outputs.version }}
           OPENCODE_CHANNEL: latest
+          OPENCODE_BUILD_PLATFORMS: ${{ matrix.target }}
 
-      - name: Package 6 selected targets
+      - name: Package (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
         run: |
           set -euo pipefail
-          DIST=packages/opencode/dist
-          VERSION="${{ steps.ver.outputs.version }}"
-          mkdir -p release
+          DIST=packages/opencode/dist/${{ matrix.target }}
+          if [ ! -f "$DIST/bin/${{ matrix.binary }}" ]; then
+            echo "Missing $DIST/bin/${{ matrix.binary }}" >&2
+            ls -la "$DIST" || true
+            exit 1
+          fi
+          tar czf "${{ matrix.target }}-v${{ steps.ver.outputs.version }}.tar.gz" -C "$DIST" bin
 
-          for name in opencode-linux-x64 opencode-linux-arm64 opencode-darwin-x64 opencode-darwin-arm64; do
-            if [ ! -d "$DIST/$name/bin" ]; then
-              echo "Missing $DIST/$name/bin" >&2
-              exit 1
-            fi
-            tar czf "release/${name}-v${VERSION}.tar.gz" -C "$DIST/$name" bin
-          done
-
-          for name in opencode-windows-x64 opencode-windows-arm64; do
-            if [ ! -d "$DIST/$name/bin" ]; then
-              echo "Missing $DIST/$name/bin" >&2
-              exit 1
-            fi
-            (cd "$DIST/$name" && zip -r "$GITHUB_WORKSPACE/release/${name}-v${VERSION}.zip" bin)
-          done
-
-          ls -lh release/
-
-      - name: Checksums
+      - name: Package (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
         run: |
-          cd release
+          $dist = "packages/opencode/dist/${{ matrix.target }}"
+          if (-not (Test-Path "$dist/bin/${{ matrix.binary }}")) {
+            Write-Error "Missing $dist/bin/${{ matrix.binary }}"
+            Get-ChildItem $dist -Recurse | Format-List
+            exit 1
+          }
+          Compress-Archive -Path "$dist/bin" `
+            -DestinationPath "${{ matrix.target }}-v${{ steps.ver.outputs.version }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ matrix.target }}-v${{ steps.ver.outputs.version }}.${{ matrix.archive }}
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: always() && !cancelled() && needs.build.result == 'success'
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
           sha256sum opencode-* > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
@@ -88,5 +148,5 @@ jobs:
           tag_name: ${{ steps.ver.outputs.tag }}
           generate_release_notes: true
           files: |
-            release/opencode-*
-            release/SHA256SUMS.txt
+            artifacts/opencode-*
+            artifacts/SHA256SUMS.txt

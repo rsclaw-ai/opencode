@@ -143,6 +143,22 @@ const allTargets: {
   },
 ]
 
+const platformAllowlist = process.env.OPENCODE_BUILD_PLATFORMS
+  ?.split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+
+const targetName = (item: { os: string; arch: string; abi?: string; avx2?: false }) =>
+  [
+    pkg.name,
+    item.os === "win32" ? "windows" : item.os,
+    item.arch,
+    item.avx2 === false ? "baseline" : undefined,
+    item.abi,
+  ]
+    .filter(Boolean)
+    .join("-")
+
 const targets = singleFlag
   ? allTargets.filter((item) => {
       if (item.os !== process.platform || item.arch !== process.arch) {
@@ -162,7 +178,9 @@ const targets = singleFlag
 
       return true
     })
-  : allTargets
+  : platformAllowlist?.length
+    ? allTargets.filter((item) => platformAllowlist.includes(targetName(item)))
+    : allTargets
 
 await $`rm -rf dist`
 
