@@ -41,7 +41,7 @@ jobs:
             archive: tar.gz
             binary: opencode
           - target: opencode-windows-x64
-            os: windows-latest
+            os: ubuntu-24.04
             archive: zip
             binary: opencode.exe
           - target: opencode-windows-arm64
